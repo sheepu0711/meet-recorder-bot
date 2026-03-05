@@ -1,0 +1,21 @@
+{
+  "name": "meet-recorder-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot to silently record Google Meet sessions on a headless VPS",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "pm2": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop meet-recorder",
+    "pm2:logs": "pm2 logs meet-recorder",
+    "setup": "bash scripts/setup.sh"
+  },
+  "keywords": ["google-meet", "recorder", "telegram", "headless", "vps"],
+  "author": "sheepu0711",
+  "license": "MIT",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "ws": "^8.18.0",
+    "dotenv": "^16.4.7"
+  }
+}
