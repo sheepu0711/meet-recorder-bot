@@ -24,7 +24,7 @@ const CONFIG = {
   resolution: process.env.RECORD_RESOLUTION || '1280x720',
   maxDuration: parseInt(process.env.MAX_DURATION) || 10800,
   displayNum: parseInt(process.env.DISPLAY_NUM) || 99,
-  cdpPort: parseInt(process.env.CDP_PORT) || 9222,
+  cdpPort: process.env.CDP_PORT ? parseInt(process.env.CDP_PORT) : (9000 + Math.floor(Math.random() * 1000)),
   guestName: GUEST_NAME,
   recordingsDir: RECORDINGS_DIR,
 };
@@ -37,7 +37,10 @@ if (!TOKEN) {
 fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 
 // ─── Bot init ───────────────────────────────────────────────────
-const bot = new TelegramBot(TOKEN, { polling: true });
+const bot = new TelegramBot(TOKEN, {
+  polling: true,
+  request: { agentOptions: { family: 4 } }
+});
 const recorder = new Recorder(CONFIG);
 
 console.log('🤖 Meet Recorder Bot started!');
@@ -130,7 +133,7 @@ bot.onText(/\/record(?:@\w+)?\s+(https?:\/\/meet\.google\.com\/[\w-]+)\s*(\d*)/,
       bot.editMessageText(
         `🎬 *Ghi Meet*\n🔗 ${meetUrl}\n\n${stages[stage] || stage}`,
         { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
-      ).catch(() => {});
+      ).catch(() => { });
     });
 
     const outputPath = await recorder.start(meetUrl, duration);
@@ -139,7 +142,7 @@ bot.onText(/\/record(?:@\w+)?\s+(https?:\/\/meet\.google\.com\/[\w-]+)\s*(\d*)/,
     bot.editMessageText(
       `✅ *Đang ghi!*\n🔗 ${meetUrl}\n📹 ${path.basename(outputPath)}\n\n💡 Gửi /stop để dừng`,
       { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
-    ).catch(() => {});
+    ).catch(() => { });
 
     // Wait for recording to end (stop or max duration)
     recorder.once('stopped', async (info) => {
@@ -176,7 +179,7 @@ bot.onText(/\/record(?:@\w+)?\s+(https?:\/\/meet\.google\.com\/[\w-]+)\s*(\d*)/,
     bot.editMessageText(
       `❌ *Lỗi:* ${err.message}`,
       { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
-    ).catch(() => {});
+    ).catch(() => { });
   }
 });
 
