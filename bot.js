@@ -8,6 +8,7 @@
 
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
+const http = require('http');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -18,6 +19,7 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALLOWED = (process.env.ALLOWED_USERS || '').split(',').map(s => s.trim()).filter(Boolean);
 const RECORDINGS_DIR = path.resolve(process.env.RECORDINGS_DIR || './recordings');
 const GUEST_NAME = process.env.GUEST_NAME || 'Recorder';
+const DOWNLOAD_PORT = parseInt(process.env.DOWNLOAD_PORT) || 8080;
 const CONFIG = {
   fps: parseInt(process.env.RECORD_FPS) || 30,
   crf: parseInt(process.env.RECORD_CRF) || 23,
@@ -27,6 +29,7 @@ const CONFIG = {
   cdpPort: process.env.CDP_PORT ? parseInt(process.env.CDP_PORT) : (9000 + Math.floor(Math.random() * 1000)),
   guestName: GUEST_NAME,
   recordingsDir: RECORDINGS_DIR,
+  minParticipants: parseInt(process.env.MIN_PARTICIPANTS) || 10,
 };
 
 if (!TOKEN) {
@@ -35,6 +38,43 @@ if (!TOKEN) {
 }
 
 fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+
+// ─── HTTP file server (download links) ──────────────────────────
+let _cachedHost = process.env.SERVER_HOST || null;
+
+async function getDownloadUrl(filename) {
+  if (!_cachedHost) {
+    try {
+      _cachedHost = execSync('curl -s --max-time 5 ifconfig.me').toString().trim();
+    } catch {
+      _cachedHost = 'localhost';
+    }
+  }
+  return `http://${_cachedHost}:${DOWNLOAD_PORT}/${encodeURIComponent(filename)}`;
+}
+
+const fileServer = http.createServer((req, res) => {
+  const filename = decodeURIComponent((req.url || '').replace(/^\//, ''));
+  // Block path traversal, only allow .mp4 files
+  if (!filename.endsWith('.mp4') || filename.includes('/') || filename.includes('..')) {
+    res.writeHead(404); return res.end('Not found');
+  }
+  const filePath = path.join(RECORDINGS_DIR, filename);
+  if (!fs.existsSync(filePath)) {
+    res.writeHead(404); return res.end('Not found');
+  }
+  const stat = fs.statSync(filePath);
+  res.writeHead(200, {
+    'Content-Type': 'video/mp4',
+    'Content-Length': stat.size,
+    'Content-Disposition': `attachment; filename="${filename}"`,
+  });
+  fs.createReadStream(filePath).pipe(res);
+});
+
+fileServer.listen(DOWNLOAD_PORT, () => {
+  console.log(`📥 File server on port ${DOWNLOAD_PORT}`);
+});
 
 // ─── Bot init ───────────────────────────────────────────────────
 const bot = new TelegramBot(TOKEN, {
@@ -144,33 +184,45 @@ bot.onText(/\/record(?:@\w+)?\s+(https?:\/\/meet\.google\.com\/[\w-]+)\s*(\d*)/,
       { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
     ).catch(() => { });
 
-    // Wait for recording to end (stop or max duration)
+    // Auto-stop when participant count drops below threshold
+    recorder.once('participant-low', (count) => {
+      bot.sendMessage(chatId,
+        `⚠️ Phòng họp chỉ còn *${count} người* — tự động dừng ghi...`,
+        { parse_mode: 'Markdown' }
+      ).catch(() => {});
+    });
+
+    // Wait for recording to end (stop, max duration, or auto-stop)
     recorder.once('stopped', async (info) => {
+      const downloadUrl = await getDownloadUrl(info.filename);
+
       await bot.sendMessage(chatId,
         `🛑 *Đã dừng ghi!*\n` +
         `📁 File: \`${info.filename}\`\n` +
         `📊 Kích thước: ${info.size}\n` +
-        `⏱ Thời lượng: ${info.duration}`,
+        `⏱ Thời lượng: ${info.duration}\n` +
+        `📥 Download: ${downloadUrl}`,
         { parse_mode: 'Markdown' }
       );
 
-      // Auto-send if < 50MB (Telegram limit)
+      // Send video if < 50MB, else send download link only
       if (info.sizeBytes < 50 * 1024 * 1024) {
         await bot.sendMessage(chatId, '📤 Đang gửi file...');
         try {
           await bot.sendVideo(chatId, info.path, {
-            caption: `🎬 Meet Recording\n📅 ${info.filename}`,
+            caption: `🎬 Meet Recording\n📅 ${info.filename}\n📥 ${downloadUrl}`,
             supports_streaming: true,
           });
-        } catch (e) {
+        } catch {
           await bot.sendDocument(chatId, info.path, {
-            caption: `🎬 Meet Recording\n📅 ${info.filename}`,
+            caption: `🎬 Meet Recording\n📅 ${info.filename}\n📥 ${downloadUrl}`,
           });
         }
       } else {
         await bot.sendMessage(chatId,
-          `⚠️ File quá lớn (${info.size}) - không gửi được qua Telegram.\n` +
-          `Dùng /download ${info.filename} nếu cần (sẽ thử chia nhỏ).`
+          `⚠️ File quá lớn (${info.size}) để gửi qua Telegram.\n` +
+          `📥 *Tải về tại:*\n${downloadUrl}`,
+          { parse_mode: 'Markdown' }
         );
       }
     });
