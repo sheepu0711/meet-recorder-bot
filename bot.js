@@ -184,13 +184,13 @@ bot.onText(/\/record(?:@\w+)?\s+(https?:\/\/meet\.google\.com\/[\w-]+)\s*(\d*)/,
       { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
     ).catch(() => { });
 
-    // Auto-stop when participant count drops below threshold
-    recorder.once('participant-low', (count) => {
-      bot.sendMessage(chatId,
-        `⚠️ Phòng họp chỉ còn *${count} người* — tự động dừng ghi...`,
-        { parse_mode: 'Markdown' }
-      ).catch(() => {});
-    });
+    // Auto-stop when participant count drops below threshold (disabled)
+    // recorder.once('participant-low', (count) => {
+    //   bot.sendMessage(chatId,
+    //     `⚠️ Phòng họp chỉ còn *${count} người* — tự động dừng ghi...`,
+    //     { parse_mode: 'Markdown' }
+    //   ).catch(() => {});
+    // });
 
     // Wait for recording to end (stop, max duration, or auto-stop)
     recorder.once('stopped', async (info) => {
