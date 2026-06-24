@@ -94,13 +94,55 @@ console.log('🤖 Meet Recorder Bot started!');
 console.log(`   Allowed users: ${ALLOWED.length ? ALLOWED.join(', ') : 'ALL (⚠️ set ALLOWED_USERS!)'}`);
 
 // ─── Auth middleware ────────────────────────────────────────────
-function isAllowed(msg) {
+function isAllowedId(id) {
   if (!ALLOWED.length) return true;
-  return ALLOWED.includes(String(msg.from.id));
+  return ALLOWED.includes(String(id));
+}
+
+function isAllowed(msg) {
+  return isAllowedId(msg.from.id);
 }
 
 function deny(msg) {
   bot.sendMessage(msg.chat.id, '🚫 Bạn không có quyền sử dụng bot này.');
+}
+
+// Register the slash-command menu so Telegram shows auto-suggest when typing "/".
+bot.setMyCommands([
+  { command: 'record', description: 'Bắt đầu ghi: /record <link> [phút]' },
+  { command: 'stop', description: 'Dừng ghi' },
+  { command: 'status', description: 'Trạng thái đang ghi' },
+  { command: 'list', description: 'Danh sách bản ghi (có nút tải)' },
+  { command: 'screenshot', description: 'Chụp màn hình Meet hiện tại' },
+  { command: 'disk', description: 'Dung lượng ổ đĩa' },
+  { command: 'help', description: 'Trợ giúp' },
+]).catch((e) => console.error('setMyCommands:', e.message));
+
+// Send a recording file to a chat (falls back to a download link if too big
+// or the upload fails). Plain text → never hits a Markdown parse error.
+async function sendRecording(chatId, rawName) {
+  const filename = path.basename(String(rawName).trim()); // sanitize traversal
+  const filePath = path.join(RECORDINGS_DIR, filename);
+  if (!filename.endsWith('.mp4') || !fs.existsSync(filePath)) {
+    return bot.sendMessage(chatId, `❌ Không tìm thấy: ${filename}`).catch(() => {});
+  }
+  const stat = fs.statSync(filePath);
+  const downloadUrl = await getDownloadUrl(filename);
+  if (stat.size > 50 * 1024 * 1024) {
+    return bot.sendMessage(chatId,
+      `⚠️ File quá lớn (${(stat.size / 1024 / 1024).toFixed(1)}MB > 50MB).\n📥 Tải về:\n${downloadUrl}`
+    ).catch(() => {});
+  }
+  await bot.sendMessage(chatId, '📤 Đang gửi...').catch(() => {});
+  try {
+    await bot.sendVideo(chatId, filePath, { caption: `🎬 ${filename}`, supports_streaming: true });
+  } catch {
+    try {
+      await bot.sendDocument(chatId, filePath, { caption: `🎬 ${filename}` });
+    } catch {
+      await bot.sendMessage(chatId, `📥 Tải về:\n${downloadUrl}`).catch(() => {});
+    }
+  }
 }
 
 // ─── Commands ───────────────────────────────────────────────────
@@ -187,38 +229,20 @@ recorder.on('stopped', async (info) => {
   const chatId = sess.chatId;
   const downloadUrl = await getDownloadUrl(info.filename);
 
+  // Plain text (no Markdown): filenames/URLs contain "_" which breaks
+  // Telegram's legacy Markdown parser. Telegram auto-links the URL anyway.
   await bot.sendMessage(chatId,
-    `🛑 *Đã dừng ghi!*\n` +
-    `📁 File: \`${info.filename}\`\n` +
+    `🛑 Đã dừng ghi!\n` +
+    `📁 File: ${info.filename}\n` +
     `📊 Kích thước: ${info.size}\n` +
     `⏱ Thời lượng: ${info.duration}\n` +
-    `📥 Download: ${downloadUrl}`,
-    { parse_mode: 'Markdown' }
-  );
+    `📥 Download: ${downloadUrl}`
+  ).catch(() => {});
 
-  // Send video if < 50MB, else send download link only
-  if (info.sizeBytes > 0 && info.sizeBytes < 50 * 1024 * 1024) {
-    await bot.sendMessage(chatId, '📤 Đang gửi file...');
-    try {
-      await bot.sendVideo(chatId, info.path, {
-        caption: `🎬 Meet Recording\n📅 ${info.filename}\n📥 ${downloadUrl}`,
-        supports_streaming: true,
-      });
-    } catch {
-      try {
-        await bot.sendDocument(chatId, info.path, {
-          caption: `🎬 Meet Recording\n📅 ${info.filename}\n📥 ${downloadUrl}`,
-        });
-      } catch {
-        await bot.sendMessage(chatId, `📥 Tải về tại:\n${downloadUrl}`);
-      }
-    }
+  if (info.sizeBytes > 0) {
+    await sendRecording(chatId, info.filename);
   } else {
-    await bot.sendMessage(chatId,
-      `⚠️ File ${info.sizeBytes > 0 ? `quá lớn (${info.size})` : 'trống/không hợp lệ'} — không gửi qua Telegram được.\n` +
-      `📥 *Tải về tại:*\n${downloadUrl}`,
-      { parse_mode: 'Markdown' }
-    );
+    await bot.sendMessage(chatId, '⚠️ File trống/không hợp lệ — không gửi được.').catch(() => {});
   }
 });
 
@@ -249,14 +273,15 @@ bot.onText(/\/record(?:@\w+)?\s+(https?:\/\/meet\.google\.com\/[\w-]+(?:\?\S*)?)
   try {
     const outputPath = await recorder.start(meetUrl, duration);
     bot.editMessageText(
-      `✅ *Đang ghi!*\n🔗 ${meetUrl}\n📹 ${path.basename(outputPath)}\n\n💡 Gửi /stop để dừng`,
-      { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
+      `✅ Đang ghi!\n🔗 ${meetUrl}\n📹 ${path.basename(outputPath)}\n\n💡 Gửi /stop để dừng`,
+      { chat_id: chatId, message_id: statusMsg.message_id }
     ).catch(() => { });
   } catch (err) {
     session = null;
+    // Plain text: error messages may contain "_"/"*"/backticks.
     bot.editMessageText(
-      `❌ *Lỗi:* ${err.message}`,
-      { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
+      `❌ Lỗi: ${err.message}`,
+      { chat_id: chatId, message_id: statusMsg.message_id }
     ).catch(() => { });
   }
 });
@@ -289,13 +314,12 @@ bot.onText(/\/status/, (msg) => {
     return bot.sendMessage(msg.chat.id, '💤 Không có phiên ghi nào đang chạy.');
   }
   bot.sendMessage(msg.chat.id,
-    `📹 *Đang ghi*\n` +
+    `📹 Đang ghi\n` +
     `🔗 ${info.url}\n` +
     `📁 ${info.filename}\n` +
     `⏱ Đã ghi: ${info.elapsed}\n` +
-    `📊 Kích thước: ${info.currentSize}`,
-    { parse_mode: 'Markdown' }
-  );
+    `📊 Kích thước: ${info.currentSize}`
+  ).catch(() => {});
 });
 
 // /screenshot
@@ -311,7 +335,7 @@ bot.onText(/\/screenshot/, async (msg) => {
   }
 });
 
-// /list
+// /list — newest first, each with a tap-to-download button (no copy needed)
 bot.onText(/\/list/, (msg) => {
   if (!isAllowed(msg)) return deny(msg);
   const files = fs.readdirSync(RECORDINGS_DIR)
@@ -323,43 +347,43 @@ bot.onText(/\/list/, (msg) => {
     return bot.sendMessage(msg.chat.id, '📂 Chưa có bản ghi nào.');
   }
 
-  const list = files.map(f => {
-    const stat = fs.statSync(path.join(RECORDINGS_DIR, f));
-    const sizeMB = (stat.size / 1024 / 1024).toFixed(1);
-    return `📹 \`${f}\` — ${sizeMB}MB`;
-  }).join('\n');
+  // Telegram inline keyboards get unwieldy beyond ~20 rows; show newest 20.
+  const top = files.slice(0, 20);
+  const keyboard = top.map(f => {
+    const sizeMB = (fs.statSync(path.join(RECORDINGS_DIR, f)).size / 1024 / 1024).toFixed(1);
+    return [{ text: `⬇️ ${f} (${sizeMB}MB)`, callback_data: `dl:${f}` }];
+  });
+  const more = files.length > top.length ? `\n…và ${files.length - top.length} file cũ hơn (dùng /download <tên>).` : '';
 
   bot.sendMessage(msg.chat.id,
-    `📂 *Danh sách bản ghi (${files.length}):*\n\n${list}`,
-    { parse_mode: 'Markdown' }
-  );
+    `📂 Bản ghi (${files.length}) — bấm để tải:${more}`,
+    { reply_markup: { inline_keyboard: keyboard } }
+  ).catch(() => {});
+});
+
+// Tap-to-download button handler
+bot.on('callback_query', async (q) => {
+  try {
+    if (!isAllowedId(q.from.id)) {
+      return bot.answerCallbackQuery(q.id, { text: '🚫 Không có quyền', show_alert: true }).catch(() => {});
+    }
+    const data = q.data || '';
+    const chatId = q.message && q.message.chat && q.message.chat.id;
+    if (data.startsWith('dl:') && chatId) {
+      await bot.answerCallbackQuery(q.id, { text: '📤 Đang gửi...' }).catch(() => {});
+      await sendRecording(chatId, data.slice(3));
+    } else {
+      await bot.answerCallbackQuery(q.id).catch(() => {});
+    }
+  } catch (e) {
+    bot.answerCallbackQuery(q.id, { text: `❌ ${e.message}` }).catch(() => {});
+  }
 });
 
 // /download <filename>
 bot.onText(/\/download(?:@\w+)?\s+(.+\.mp4)/, async (msg, match) => {
   if (!isAllowed(msg)) return deny(msg);
-  const chatId = msg.chat.id;
-  const filename = match[1].trim();
-  const filePath = path.join(RECORDINGS_DIR, filename);
-
-  if (!fs.existsSync(filePath)) {
-    return bot.sendMessage(chatId, `❌ Không tìm thấy: \`${filename}\``, { parse_mode: 'Markdown' });
-  }
-
-  const stat = fs.statSync(filePath);
-  if (stat.size > 50 * 1024 * 1024) {
-    return bot.sendMessage(chatId, `⚠️ File quá lớn (${(stat.size / 1024 / 1024).toFixed(1)}MB > 50MB limit).`);
-  }
-
-  await bot.sendMessage(chatId, '📤 Đang gửi...');
-  try {
-    await bot.sendVideo(chatId, filePath, {
-      caption: `🎬 ${filename}`,
-      supports_streaming: true,
-    });
-  } catch {
-    await bot.sendDocument(chatId, filePath, { caption: `🎬 ${filename}` });
-  }
+  await sendRecording(msg.chat.id, match[1]);
 });
 
 // /delete <filename>
