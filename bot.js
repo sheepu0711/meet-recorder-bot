@@ -11,6 +11,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const http = require('http');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const Recorder = require('./lib/recorder');
 
@@ -26,10 +27,16 @@ const CONFIG = {
   resolution: process.env.RECORD_RESOLUTION || '1280x720',
   maxDuration: parseInt(process.env.MAX_DURATION) || 10800,
   displayNum: parseInt(process.env.DISPLAY_NUM) || 99,
-  cdpPort: process.env.CDP_PORT ? parseInt(process.env.CDP_PORT) : (9000 + Math.floor(Math.random() * 1000)),
   guestName: GUEST_NAME,
   recordingsDir: RECORDINGS_DIR,
   minParticipants: parseInt(process.env.MIN_PARTICIPANTS) || 10,
+  // Persistent Chrome profile keeps the Google login between runs.
+  chromeProfileDir: process.env.CHROME_PROFILE_DIR ||
+    path.join(os.homedir(), '.meet-recorder', 'chrome-profile'),
+  chromePath: process.env.CHROME_PATH || '',
+  // Optional dedicated Google account for joining non-public Meets.
+  googleEmail: process.env.GOOGLE_EMAIL || '',
+  googlePassword: process.env.GOOGLE_PASSWORD || '',
 };
 
 if (!TOKEN) {
@@ -105,7 +112,7 @@ bot.onText(/\/start/, (msg) => {
     '🎬 *Meet Recorder Bot*\n\n' +
     'Ghi âm Google Meet tự động trên VPS.\n\n' +
     '📋 *Lệnh:*\n' +
-    '`/record <meet-url>` — Bắt đầu ghi\n' +
+    '`/record <meet-url> [phút]` — Bắt đầu ghi\n' +
     '`/stop` — Dừng ghi\n' +
     '`/status` — Trạng thái hiện tại\n' +
     '`/screenshot` — Chụp màn hình\n' +
@@ -135,23 +142,101 @@ bot.onText(/\/help/, (msg) => {
     `• Thời lượng tối đa: ${Math.floor(CONFIG.maxDuration / 3600)}h\n` +
     `• Tên guest: ${CONFIG.guestName}\n\n` +
     '💡 *Tips:*\n' +
-    '• Bot join dưới dạng guest, mic/cam tắt hoàn toàn\n' +
-    '• Video ghi lại toàn bộ màn hình Meet + âm thanh\n' +
-    '• File > 50MB sẽ không gửi được qua Telegram',
+    '• `/record <link> 30` = ghi tối đa 30 phút (số là phút)\n' +
+    '• Mặc định join khách (chỉ Meet công khai). Meet cần đăng nhập → chạy `npm run login` trên VPS\n' +
+    '• Mic/cam tắt hoàn toàn; ghi cả màn hình Meet + âm thanh\n' +
+    '• File > 50MB sẽ gửi qua link download thay vì Telegram',
     { parse_mode: 'Markdown' }
   );
 });
 
-// /record <url> [duration]
-bot.onText(/\/record(?:@\w+)?\s+(https?:\/\/meet\.google\.com\/[\w-]+)\s*(\d*)/, async (msg, match) => {
+// ─── Recording session + recorder events (registered ONCE) ──────
+// `session` is the single source of truth for the active recording's chat
+// context. Listeners are attached once here (not per /record) to avoid an
+// EventEmitter listener leak and editing stale status messages.
+let session = null; // { chatId, statusMsgId, meetUrl }
+
+const STAGE_MSGS = {
+  xvfb: '🖥 Khởi tạo màn hình ảo...',
+  pulse: '🔊 Khởi tạo audio...',
+  chrome: '🌐 Mở Chrome...',
+  login: '🔑 Đăng nhập Google...',
+  joining: '🚪 Đang vào Meet...',
+  recording: '📹 Đang ghi! Gửi /stop để dừng.',
+};
+
+recorder.on('stage', (stage) => {
+  if (!session || !session.statusMsgId) return;
+  bot.editMessageText(
+    `🎬 *Ghi Meet*\n🔗 ${session.meetUrl}\n\n${STAGE_MSGS[stage] || stage}`,
+    { chat_id: session.chatId, message_id: session.statusMsgId, parse_mode: 'Markdown' }
+  ).catch(() => { });
+});
+
+recorder.on('interrupted', (info) => {
+  if (!session) return;
+  bot.sendMessage(session.chatId,
+    `⚠️ ${(info && info.reason) || 'Phiên ghi bị gián đoạn.'} Đang lưu phần đã ghi...`
+  ).catch(() => { });
+});
+
+recorder.on('stopped', async (info) => {
+  const sess = session;
+  session = null;
+  if (!sess) return;
+  const chatId = sess.chatId;
+  const downloadUrl = await getDownloadUrl(info.filename);
+
+  await bot.sendMessage(chatId,
+    `🛑 *Đã dừng ghi!*\n` +
+    `📁 File: \`${info.filename}\`\n` +
+    `📊 Kích thước: ${info.size}\n` +
+    `⏱ Thời lượng: ${info.duration}\n` +
+    `📥 Download: ${downloadUrl}`,
+    { parse_mode: 'Markdown' }
+  );
+
+  // Send video if < 50MB, else send download link only
+  if (info.sizeBytes > 0 && info.sizeBytes < 50 * 1024 * 1024) {
+    await bot.sendMessage(chatId, '📤 Đang gửi file...');
+    try {
+      await bot.sendVideo(chatId, info.path, {
+        caption: `🎬 Meet Recording\n📅 ${info.filename}\n📥 ${downloadUrl}`,
+        supports_streaming: true,
+      });
+    } catch {
+      try {
+        await bot.sendDocument(chatId, info.path, {
+          caption: `🎬 Meet Recording\n📅 ${info.filename}\n📥 ${downloadUrl}`,
+        });
+      } catch {
+        await bot.sendMessage(chatId, `📥 Tải về tại:\n${downloadUrl}`);
+      }
+    }
+  } else {
+    await bot.sendMessage(chatId,
+      `⚠️ File ${info.sizeBytes > 0 ? `quá lớn (${info.size})` : 'trống/không hợp lệ'} — không gửi qua Telegram được.\n` +
+      `📥 *Tải về tại:*\n${downloadUrl}`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+});
+
+// /record <url> [minutes]
+bot.onText(/\/record(?:@\w+)?\s+(https?:\/\/meet\.google\.com\/[\w-]+(?:\?\S*)?)\s*(\d*)/, async (msg, match) => {
   if (!isAllowed(msg)) return deny(msg);
   const chatId = msg.chat.id;
   const meetUrl = match[1];
-  const duration = match[2] ? parseInt(match[2]) : CONFIG.maxDuration;
+  // The trailing number is interpreted as MINUTES (intuitive), capped to max.
+  const minutes = match[2] ? parseInt(match[2]) : Math.floor(CONFIG.maxDuration / 60);
+  const duration = Math.min(Math.max(minutes, 1) * 60, CONFIG.maxDuration);
 
-  if (recorder.isRecording()) {
-    return bot.sendMessage(chatId, '⚠️ Đang ghi một phiên khác! Gửi /stop trước.');
+  // Reserve the slot synchronously (before any await) so two quick /record
+  // messages can't both pass the guard.
+  if (recorder.isRecording() || session) {
+    return bot.sendMessage(chatId, '⚠️ Đang ghi/chuẩn bị một phiên khác! Gửi /stop trước.');
   }
+  session = { chatId, statusMsgId: null, meetUrl };
 
   const statusMsg = await bot.sendMessage(chatId,
     `🎬 *Đang chuẩn bị ghi...*\n` +
@@ -159,75 +244,16 @@ bot.onText(/\/record(?:@\w+)?\s+(https?:\/\/meet\.google\.com\/[\w-]+)\s*(\d*)/,
     `⏱ Max: ${Math.floor(duration / 60)} phút`,
     { parse_mode: 'Markdown' }
   );
+  session.statusMsgId = statusMsg.message_id;
 
   try {
-    // Progress updates
-    recorder.on('stage', (stage) => {
-      const stages = {
-        'xvfb': '🖥 Khởi tạo màn hình ảo...',
-        'pulse': '🔊 Khởi tạo audio...',
-        'chrome': '🌐 Mở Chrome...',
-        'joining': '🚪 Đang vào Meet...',
-        'recording': '📹 Đang ghi! Gửi /stop để dừng.',
-      };
-      bot.editMessageText(
-        `🎬 *Ghi Meet*\n🔗 ${meetUrl}\n\n${stages[stage] || stage}`,
-        { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
-      ).catch(() => { });
-    });
-
     const outputPath = await recorder.start(meetUrl, duration);
-
-    // Recording started successfully
     bot.editMessageText(
       `✅ *Đang ghi!*\n🔗 ${meetUrl}\n📹 ${path.basename(outputPath)}\n\n💡 Gửi /stop để dừng`,
       { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
     ).catch(() => { });
-
-    // Auto-stop when participant count drops below threshold (disabled)
-    // recorder.once('participant-low', (count) => {
-    //   bot.sendMessage(chatId,
-    //     `⚠️ Phòng họp chỉ còn *${count} người* — tự động dừng ghi...`,
-    //     { parse_mode: 'Markdown' }
-    //   ).catch(() => {});
-    // });
-
-    // Wait for recording to end (stop, max duration, or auto-stop)
-    recorder.once('stopped', async (info) => {
-      const downloadUrl = await getDownloadUrl(info.filename);
-
-      await bot.sendMessage(chatId,
-        `🛑 *Đã dừng ghi!*\n` +
-        `📁 File: \`${info.filename}\`\n` +
-        `📊 Kích thước: ${info.size}\n` +
-        `⏱ Thời lượng: ${info.duration}\n` +
-        `📥 Download: ${downloadUrl}`,
-        { parse_mode: 'Markdown' }
-      );
-
-      // Send video if < 50MB, else send download link only
-      if (info.sizeBytes < 50 * 1024 * 1024) {
-        await bot.sendMessage(chatId, '📤 Đang gửi file...');
-        try {
-          await bot.sendVideo(chatId, info.path, {
-            caption: `🎬 Meet Recording\n📅 ${info.filename}\n📥 ${downloadUrl}`,
-            supports_streaming: true,
-          });
-        } catch {
-          await bot.sendDocument(chatId, info.path, {
-            caption: `🎬 Meet Recording\n📅 ${info.filename}\n📥 ${downloadUrl}`,
-          });
-        }
-      } else {
-        await bot.sendMessage(chatId,
-          `⚠️ File quá lớn (${info.size}) để gửi qua Telegram.\n` +
-          `📥 *Tải về tại:*\n${downloadUrl}`,
-          { parse_mode: 'Markdown' }
-        );
-      }
-    });
-
   } catch (err) {
+    session = null;
     bot.editMessageText(
       `❌ *Lỗi:* ${err.message}`,
       { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }

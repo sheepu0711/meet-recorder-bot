@@ -111,6 +111,36 @@ RECORD_RESOLUTION=1280x720
 MAX_DURATION=10800     # 3 giờ (seconds)
 ```
 
+### 4. Đăng nhập Google (để vào Meet cần đăng nhập)
+
+Mặc định bot vào Meet dưới dạng **khách** — chỉ vào được Meet công khai cho phép khách.
+Để vào các Meet **yêu cầu đăng nhập**, cho bot dùng một tài khoản Google
+(**nên dùng tài khoản phụ, tạo riêng cho bot, KHÔNG bật 2FA**).
+
+Cơ chế **hybrid**: bot dùng một *profile Chrome cố định* để nhớ phiên đăng nhập.
+Ưu tiên session đã lưu; nếu chưa đăng nhập và có sẵn credentials thì tự đăng nhập.
+
+**Cách A — đăng nhập 1 lần (an toàn nhất, không lưu mật khẩu):**
+
+```bash
+# (tuỳ chọn) điền GOOGLE_EMAIL/PASSWORD vào .env để tự động, rồi:
+npm run login
+```
+
+`npm run login` mở Chrome với profile cố định, đăng nhập, lưu cookie lại. Chạy **một lần**.
+Ảnh màn hình kết quả lưu ở `recordings/login_*.png` (xem để biết Google có hỏi gì).
+
+**Cách B — tự đăng nhập mỗi khi cần:** chỉ cần điền trong `.env`:
+
+```env
+GOOGLE_EMAIL=botaccount@gmail.com
+GOOGLE_PASSWORD=app-or-account-password
+```
+
+> ⚠️ Đăng nhập tự động kiểu headless hay bị Google chặn/khoá nếu bật 2FA hoặc
+> dùng tài khoản chính. Nếu thất bại bot **tự fallback về join khách**.
+> Khuyến nghị: tài khoản phụ + `npm run login` một lần.
+
 ## 🎮 Sử dụng
 
 ### Chạy bot
@@ -270,9 +300,17 @@ MAX_DURATION=21600
 
 ### Bot không join được Meet
 
-- **Meet yêu cầu đăng nhập**: Bot join dưới dạng guest. Meet phải cho phép guest tham gia.
-- **"Ask to join"**: Host phải approve. Bot sẽ đợi ở lobby.
-- **Chrome crash**: Kiểm tra `logs/error.log` và RAM (`free -h`).
+- **Meet yêu cầu đăng nhập**: join khách chỉ vào được Meet công khai. Cấu hình
+  tài khoản Google (xem *Cấu hình → Đăng nhập Google*) rồi chạy `npm run login`.
+- **"Ask to join"**: Host phải duyệt. Bot đợi ở lobby và **vẫn bắt đầu ghi** —
+  ghi lại đúng thời điểm được cho vào.
+- **Bấm nút Join không vào / điện thoại thì vào được**: thường do Chrome bị Google
+  nhận diện là bot. Bản này đã dùng `puppeteer-extra-plugin-stealth` + click chuột
+  thật để khắc phục. Nếu vẫn lỗi, gửi `/screenshot` để xem Chrome đang hiện gì.
+- **Chrome crash giữa chừng**: bot sẽ báo "bị gián đoạn", lưu phần đã ghi và gửi file.
+  Kiểm tra `logs/error.log` và RAM (`free -h`); cần ≥ 2GB RAM cho Chrome + FFmpeg.
+- **Đăng nhập Google thất bại**: dùng tài khoản phụ KHÔNG bật 2FA; xem ảnh
+  `recordings/login_*.png` để biết Google đang chặn/hỏi gì.
 
 ### Video bị đen / không có nội dung
 

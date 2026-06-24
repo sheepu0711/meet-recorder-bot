@@ -5,6 +5,7 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
+    "login": "node scripts/login.js",
     "pm2": "pm2 start ecosystem.config.js",
     "pm2:stop": "pm2 stop meet-recorder",
     "pm2:logs": "pm2 logs meet-recorder",
