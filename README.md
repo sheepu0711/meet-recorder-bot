@@ -130,6 +130,17 @@ npm run login
 `npm run login` mở Chrome với profile cố định, đăng nhập, lưu cookie lại. Chạy **một lần**.
 Ảnh màn hình kết quả lưu ở `recordings/login_*.png` (xem để biết Google có hỏi gì).
 
+> Nếu KHÔNG điền credentials, `npm run login` sẽ giữ Chrome sống 10 phút và in
+> hướng dẫn để bạn tự đăng nhập bằng tay. Cách ổn định nhất là **VNC vào màn hình ảo**:
+> ```bash
+> # trên VPS
+> apt-get install -y x11vnc && x11vnc -display :99 -localhost -rfbport 5900 -nopw -forever -bg
+> # trên máy bạn
+> ssh -L 5900:localhost:5900 root@<IP-VPS>   # rồi mở VNC viewer tới localhost:5900
+> ```
+> (chrome://inspect qua `ssh -L 9222:localhost:9222` cũng được, nhưng KHÔNG mở
+> thẳng `http://localhost:9222` — phải vào `chrome://inspect` → thêm `localhost:9222`.)
+
 **Cách B — tự đăng nhập mỗi khi cần:** chỉ cần điền trong `.env`:
 
 ```env

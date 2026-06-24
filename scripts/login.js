@@ -18,7 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
 const { launchBrowser, defaultProfileDir } = require('../lib/browser');
-const { isSignedIn, googleLogin } = require('../lib/google-auth');
+const { isSignedIn, hasSessionCookie, googleLogin } = require('../lib/google-auth');
 
 const DISPLAY_NUM = parseInt(process.env.DISPLAY_NUM) || 99;
 const RES = process.env.RECORD_RESOLUTION || '1280x720';
@@ -91,23 +91,33 @@ function snapshot(name) {
         snapshot('login_failed.png');
       }
     } else {
-      console.log('\n⚠️  Chưa cấu hình GOOGLE_EMAIL / GOOGLE_PASSWORD trong .env.');
-      console.log('   Cách 1 (khuyến nghị): thêm 2 dòng đó vào .env rồi chạy lại `npm run login`.');
-      console.log('   Cách 2 (đăng nhập thủ công qua SSH tunnel):');
-      console.log('     1) Trên máy bạn:  ssh -L 9222:localhost:9222 user@vps');
-      console.log('     2) Mở http://localhost:9222 → bấm vào tab → đăng nhập Google bằng tay.');
-      console.log('   Đang mở trang đăng nhập Google và đợi tối đa 5 phút...');
+      console.log('\n⚠️  Chưa cấu hình GOOGLE_EMAIL / GOOGLE_PASSWORD trong .env.\n');
+      console.log('   👉 Cách 1 (DỄ NHẤT): thêm GOOGLE_EMAIL + GOOGLE_PASSWORD vào .env rồi chạy lại `npm run login`.\n');
+      console.log('   👉 Cách 2 — VNC (ổn định nhất để tự tay đăng nhập):');
+      console.log('       Trên VPS:   apt-get install -y x11vnc && x11vnc -display :' + DISPLAY_NUM + ' -localhost -rfbport 5900 -nopw -forever -bg');
+      console.log('       Trên máy bạn: ssh -L 5900:localhost:5900 root@<IP-VPS>');
+      console.log('       Mở VNC viewer tới localhost:5900 → thấy Chrome → đăng nhập bằng tay.\n');
+      console.log('   👉 Cách 3 — chrome://inspect qua SSH tunnel (có thể trắng nếu lệch phiên bản Chrome):');
+      console.log('       ssh -L 9222:localhost:9222 root@<IP-VPS>');
+      console.log('       Mở chrome://inspect trên máy bạn → "Configure..." → thêm  localhost:9222');
+      console.log('       → mục "Remote Target" → bấm "inspect" (KHÔNG mở thẳng http://localhost:9222).\n');
+      console.log('   Đang mở trang đăng nhập Google, giữ Chrome sống 10 phút để bạn đăng nhập...');
       await page.goto('https://accounts.google.com/', { waitUntil: 'domcontentloaded' }).catch(() => {});
-      const deadline = Date.now() + 5 * 60 * 1000;
-      while (Date.now() < deadline) {
+      const deadline = Date.now() + 10 * 60 * 1000;
+      let done = false;
+      while (Date.now() < deadline && !done) {
+        await sleep(10000);
         snapshot('login_manual.png');
-        if (await isSignedIn(page)) {
-          console.log('✅ Đã phát hiện đăng nhập! Session đã lưu.');
-          snapshot('login_success.png');
-          break;
+        // Non-navigating check so we don't interrupt the manual login flow.
+        if (await hasSessionCookie(page)) {
+          if (await isSignedIn(page)) {
+            console.log('✅ Đã phát hiện đăng nhập! Session đã lưu.');
+            snapshot('login_success.png');
+            done = true;
+          }
         }
-        await sleep(15000);
       }
+      if (!done) console.log('⌛ Hết 10 phút mà chưa thấy đăng nhập. Chạy lại nếu cần thêm thời gian.');
     }
   } finally {
     await sleep(1500);
